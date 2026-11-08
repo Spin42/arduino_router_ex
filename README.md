@@ -43,9 +43,50 @@ ArduinoRouterEx.monitor_write("hello\n")
 Binaries go to the sketch as MessagePack strings; wrap them in `Msgpax.Bin`
 for a sketch parameter of type `MsgPack::bin_t<uint8_t>`.
 
+## The microcontroller's pins, I2C buses and LED matrix
+
+The library ships `io`, a sketch that exposes the microcontroller's pins, ADC,
+PWM, I2C buses and LED matrix over the Bridge (source in `sketches/io`,
+prebuilt for the VENTUNO Q against `arduino:zephyr` 1.1.0). Install it, then
+use the pins from Elixir:
+
+```elixir
+{:ok, _} = ArduinoRouterEx.IO.install_sketch()
+
+{:ok, a0} = ArduinoRouterEx.IO.pin("A0")
+{:ok, level} = ArduinoRouterEx.IO.analog_read(a0)
+
+ArduinoRouterEx.Matrix.draw(frame)   # 8 rows of 13 brightness values
+```
+
+`ArduinoRouterEx.GPIO` and `ArduinoRouterEx.I2C` put the microcontroller's
+pins and buses behind Circuits, as the `"mcu"` controller and the
+`"mcu-i2c0"` to `"mcu-i2c2"` buses, and hand everything else to Linux, so the
+SoC's GPIOs and buses keep working:
+
+```elixir
+{:ok, led} = Circuits.GPIO.open({"mcu", "LED1_R"}, :output)
+Circuits.GPIO.write(led, 1)
+
+{:ok, bus} = Circuits.I2C.open("mcu-i2c0")
+Circuits.I2C.write_read(bus, 0x48, <<0x00>>, 2)
+```
+
+Set them in `config/runtime.exs`: Circuits builds its Linux backends only
+when they are the default at build time.
+
+```elixir
+config :circuits_gpio, default_backend: {ArduinoRouterEx.GPIO, fallback: Circuits.GPIO.CDev}
+config :circuits_i2c, default_backend: {ArduinoRouterEx.I2C, fallback: Circuits.I2C.I2CDev}
+```
+
+Each call is a USB round trip of about a millisecond, and the sketch samples
+watched pins every millisecond: fine for LEDs, buttons, sensors and slow PWM.
+Anything that needs tighter timing belongs in a sketch of its own.
+
 ## Installing a sketch
 
-`ArduinoRouterEx.Sketch.install/2` flashes a sketch with the board's flash
+For a sketch of your own, `ArduinoRouterEx.Sketch.install/2` flashes it with the board's flash
 command, and skips it when the same sketch is already installed;
 `ArduinoRouterEx.await_routes/2` then waits for the sketch to register its
 functions:

@@ -39,6 +39,7 @@ defmodule ArduinoRouterEx do
   def init(opts) do
     children = [
       {Router, name: @router},
+      {ArduinoRouterEx.IO.Events, router: @router},
       {Serial, Keyword.put(opts, :router, @router)}
     ]
 
