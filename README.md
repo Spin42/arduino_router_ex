@@ -80,6 +80,18 @@ config :circuits_gpio, default_backend: {ArduinoRouterEx.GPIO, fallback: Circuit
 config :circuits_i2c, default_backend: {ArduinoRouterEx.I2C, fallback: Circuits.I2C.I2CDev}
 ```
 
+`ArduinoRouterEx.PulseTrain` pulses several pins from one microcontroller
+timer, with the same period and phase, in 1 µs steps. On the VENTUNO Q, D3
+and D5 can pulse:
+
+```elixir
+# 30 Hz: D3 low for the first 5 ms, D5 low for the last 13.3 ms.
+ArduinoRouterEx.PulseTrain.start(33_333, [
+  {"D3", width_us: 5_000},
+  {"D5", offset_us: 20_000, width_us: 13_333}
+])
+```
+
 Each call is a USB round trip of about a millisecond, and the sketch samples
 watched pins every millisecond: fine for LEDs, buttons, sensors and slow PWM.
 Anything that needs tighter timing belongs in a sketch of its own.

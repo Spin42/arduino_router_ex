@@ -1,14 +1,16 @@
 defmodule ArduinoRouterEx.FakeIOSketch do
   @moduledoc false
-  # A connection standing in for the io sketch: it registers the io/* and
-  # matrix/* methods, keeps pin levels, answers I2C transfers to a device at
-  # 0x48 that echoes the register written, and notifies io/changed when a
-  # watched pin changes.
+  # A connection standing in for the io sketch: it registers the io/*,
+  # matrix/* and pulse/* methods, keeps pin levels, answers I2C transfers to a
+  # device at 0x48 that echoes the register written, pulses D3 and D5, and
+  # notifies io/changed when a watched pin changes.
 
   alias ArduinoRouterEx.{Protocol, Router}
 
-  @methods ~w(io/pin io/mode io/write io/read io/watch io/analog_read io/i2c matrix/draw)
-  @pins %{"D13" => 13, "A0" => 14, "LED1_R" => 61}
+  @methods ~w(io/pin io/mode io/write io/read io/watch io/analog_read io/i2c matrix/draw
+              pulse/set pulse/start pulse/stop)
+  @pins %{"D3" => 3, "D13" => 13, "A0" => 14, "LED1_R" => 61}
+  @pulse_pins [3, 5]
 
   def start(router) do
     test = self()
@@ -74,6 +76,12 @@ defmodule ArduinoRouterEx.FakeIOSketch do
     do: {[2, Msgpax.Bin.new(<<>>)], state}
 
   defp call(_router, "matrix/draw", [pixels], state), do: {byte_size(pixels) == 104, state}
+
+  defp call(_router, "pulse/set", [pin, _offset, _width, _level], state),
+    do: {pin in @pulse_pins, state}
+
+  defp call(_router, "pulse/start", [_period], state), do: {true, state}
+  defp call(_router, "pulse/stop", [], state), do: {true, state}
 
   defp set_level(router, state, pin, value) do
     previous = Map.get(state.levels, pin, 0)

@@ -14,13 +14,28 @@
 //   io/i2c_clock(bus, hz)             -> bool
 //   io/i2c(bus, address, data, count) -> [status, bytes read]
 //   matrix/draw(pixels)               -> bool  (8 rows of 13 pixels, one byte each)
+//   pulse/set(pin, offset_us, width_us, level) -> bool  (VENTUNO Q only, see below)
+//   pulse/start(period_us)            -> bool
+//   pulse/stop()                      -> bool
 //
 // A watched pin is sampled every millisecond; each change is sent to Linux as
 // the notification io/changed(pin, value).
+//
+// On the VENTUNO Q, TIM3 counts in 1 us ticks and pulses D3 (PB1, channel 4)
+// and D5 (PB5, channel 2) with the same period and phase: pulse/set gives a
+// pin a pulse width_us long, offset_us into each period, at level 0 (low) or
+// 1 (high); pulse/start starts every pin set since the last pulse/stop, which
+// returns them to inputs. In combined PWM mode 2, a pulse starts on its
+// channel's compare value and ends on its pair's (channel 3 for D3, channel 1
+// for D5).
 
 #include <Arduino_RouterBridge.h>
 #include <Arduino_LED_Matrix.h>
 #include <Wire.h>
+
+#if defined(CONFIG_BOARD_ARDUINO_VENTUNO_Q)
+#include <soc.h>
+#endif
 
 static const char *VERSION = "arduino_router_ex io 1";
 static const size_t MATRIX_PIXELS = 104;
@@ -178,6 +193,118 @@ bool matrix_draw(MsgPack::bin_t<uint8_t> pixels) {
     return true;
 }
 
+#if defined(CONFIG_BOARD_ARDUINO_VENTUNO_Q)
+static const uint32_t TICK_HZ = 1000000;
+static const uint32_t MAX_PERIOD_US = 65536;
+// OCxM values: PWM mode 1 and combined PWM mode 2.
+static const uint32_t OCM_PWM1 = 0b0110;
+static const uint32_t OCM_COMBINED_PWM2 = 0b1101;
+
+struct Pulse {
+    int pin;
+    uint32_t gpio;       // PBx
+    bool set;
+    int offset_us;
+    int width_us;
+    int level;
+};
+
+// D3 and D5, in the order of the TIM3 channel pairs (3, 4) and (1, 2).
+static Pulse pulses[] = {{3, 1, false, 0, 0, 0}, {5, 5, false, 0, 0, 0}};
+static bool pulsing = false;
+
+// Encodes a 4-bit OCxM value for the low (channel 1 or 3) or high (2 or 4)
+// half of a CCMR register, with its preload enabled.
+static uint32_t ccmr_output(uint32_t ocm, bool high_half) {
+    uint32_t value = ((ocm & 0b0111) << 4) | ((ocm >> 3) << 16) | (1u << 3);
+    return high_half ? value << 8 : value;
+}
+
+static void pulse_halt() {
+    RCC->APB1LENR |= RCC_APB1LENR_TIM3EN;
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOBEN;
+    TIM3->CR1 &= ~TIM_CR1_CEN;
+    TIM3->CCER &= ~(TIM_CCER_CC1E | TIM_CCER_CC1P | TIM_CCER_CC2E | TIM_CCER_CC2P |
+                    TIM_CCER_CC3E | TIM_CCER_CC3P | TIM_CCER_CC4E | TIM_CCER_CC4P);
+}
+
+bool pulse_set(int pin, int offset_us, int width_us, int level) {
+    if (offset_us < 0 || width_us < 1 || (level != 0 && level != 1)) {
+        return false;
+    }
+    for (Pulse &pulse : pulses) {
+        if (pulse.pin == pin) {
+            pulse = {pin, pulse.gpio, true, offset_us, width_us, level};
+            return true;
+        }
+    }
+    return false;
+}
+
+bool pulse_start(int period_us) {
+    if (period_us < 2 || (uint32_t)period_us > MAX_PERIOD_US) {
+        return false;
+    }
+    bool any = false;
+    for (const Pulse &pulse : pulses) {
+        if (pulse.set && (pulse.width_us >= period_us || pulse.offset_us + pulse.width_us > period_us)) {
+            return false;
+        }
+        any = any || pulse.set;
+    }
+    if (!any) {
+        return false;
+    }
+    pulse_halt();
+
+    TIM3->PSC = CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC / TICK_HZ - 1;
+    TIM3->ARR = period_us - 1;
+    TIM3->CCR4 = pulses[0].offset_us;
+    TIM3->CCR3 = pulses[0].offset_us + pulses[0].width_us;
+    TIM3->CCR2 = pulses[1].offset_us;
+    TIM3->CCR1 = pulses[1].offset_us + pulses[1].width_us;
+    TIM3->CCMR2 = ccmr_output(OCM_PWM1, false) | ccmr_output(OCM_COMBINED_PWM2, true);
+    TIM3->CCMR1 = ccmr_output(OCM_PWM1, false) | ccmr_output(OCM_COMBINED_PWM2, true);
+
+    uint32_t ccer = 0;
+    if (pulses[0].set) {
+        ccer |= TIM_CCER_CC4E | (pulses[0].level ? 0 : TIM_CCER_CC4P);
+    }
+    if (pulses[1].set) {
+        ccer |= TIM_CCER_CC2E | (pulses[1].level ? 0 : TIM_CCER_CC2P);
+    }
+    TIM3->CCER |= ccer;
+
+    TIM3->CR1 |= TIM_CR1_ARPE;
+    TIM3->CNT = 0;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CR1 |= TIM_CR1_CEN;
+
+    // Alternate function 2: TIM3_CH4 on PB1, TIM3_CH2 on PB5.
+    for (const Pulse &pulse : pulses) {
+        if (pulse.set) {
+            uint32_t afr = 4 * pulse.gpio, moder = 2 * pulse.gpio;
+            GPIOB->AFR[0] = (GPIOB->AFR[0] & ~(0xFu << afr)) | (2u << afr);
+            GPIOB->MODER = (GPIOB->MODER & ~(0b11u << moder)) | (0b10u << moder);
+        }
+    }
+    pulsing = true;
+    return true;
+}
+
+bool pulse_stop() {
+    pulse_halt();
+    for (Pulse &pulse : pulses) {
+        if (pulsing && pulse.set) {
+            GPIOB->MODER &= ~(0b11u << (2 * pulse.gpio));
+        }
+        pulse.set = false;
+    }
+    pulsing = false;
+    return true;
+}
+#endif
+
 void setup() {
     matrix.begin();
     matrix.setGrayscaleBits(8);
@@ -197,6 +324,11 @@ void setup() {
     Bridge.provide_safe("io/i2c_clock", io_i2c_clock);
     Bridge.provide_safe("io/i2c", io_i2c);
     Bridge.provide("matrix/draw", matrix_draw);
+#if defined(CONFIG_BOARD_ARDUINO_VENTUNO_Q)
+    Bridge.provide("pulse/set", pulse_set);
+    Bridge.provide("pulse/start", pulse_start);
+    Bridge.provide("pulse/stop", pulse_stop);
+#endif
 }
 
 void loop() {

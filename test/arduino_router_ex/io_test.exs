@@ -2,7 +2,7 @@ defmodule ArduinoRouterEx.IOTest do
   # The IO modules use the router started under its default name.
   use ExUnit.Case, async: false
 
-  alias ArduinoRouterEx.{FakeIOSketch, GPIO, I2C, IO, Matrix, Router}
+  alias ArduinoRouterEx.{FakeIOSketch, GPIO, I2C, IO, Matrix, PulseTrain, Router}
 
   setup do
     start_supervised!({Router, name: ArduinoRouterEx.Router})
@@ -48,6 +48,38 @@ defmodule ArduinoRouterEx.IOTest do
     assert Matrix.draw(List.duplicate(List.duplicate(255, 13), 8)) == :ok
     assert Matrix.clear() == :ok
     assert Matrix.draw([[1, 2]]) == {:error, :invalid_frame}
+  end
+
+  test "sets each pin's pulse, then starts the train" do
+    pulses = [
+      {"D3", width_us: 5_000},
+      {5, offset_us: 20_000, width_us: 13_333, level: :high}
+    ]
+
+    assert PulseTrain.start(33_333, pulses) == :ok
+    assert_receive {:sketch_called, "pulse/stop", []}
+    assert_receive {:sketch_called, "pulse/set", [3, 0, 5_000, 0]}
+    assert_receive {:sketch_called, "pulse/set", [5, 20_000, 13_333, 1]}
+    assert_receive {:sketch_called, "pulse/start", [33_333]}
+
+    assert PulseTrain.stop() == :ok
+  end
+
+  test "refuses pulse trains the timer cannot produce" do
+    pulse = [{"D3", width_us: 5_000}]
+
+    assert PulseTrain.start(100_000, pulse) == {:error, :period_out_of_range}
+    assert PulseTrain.start(33_333, []) == {:error, :no_pulses}
+    assert PulseTrain.start(33_333, [{"D3", width_us: 33_333}]) == {:error, :pulse_out_of_range}
+
+    assert PulseTrain.start(33_333, [{"D3", offset_us: 30_000, width_us: 5_000}]) ==
+             {:error, :pulse_out_of_range}
+
+    assert PulseTrain.start(33_333, [{"nope", width_us: 5_000}]) == {:error, :not_found}
+    refute_receive {:sketch_called, "pulse/" <> _, _}, 50
+
+    assert PulseTrain.start(33_333, [{13, width_us: 5_000}]) == {:error, {:not_supported, 13}}
+    refute_receive {:sketch_called, "pulse/start", _}, 50
   end
 
   describe "GPIO backend" do
