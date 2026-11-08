@@ -146,7 +146,8 @@ frame = for row <- 0..7, do: for(col <- 0..12, do: if(row == col, do: 255, else:
 `ArduinoRouterEx.PulseTrain` pulses several pins from one microcontroller
 timer, with the same period and phase, in 1 µs steps. On the VENTUNO Q, D3
 and D5 can pulse; each pulse has a width, an offset into the period and a
-level, and the pins are inputs again after `stop/0`:
+level, and the pins are inputs again after `stop/0`. The timer also drives
+PWM on D3 and D5, which pauses during a train and resumes after it:
 
 ```elixir
 alias ArduinoRouterEx.PulseTrain

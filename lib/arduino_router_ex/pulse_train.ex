@@ -5,7 +5,8 @@ defmodule ArduinoRouterEx.PulseTrain do
   steps.
 
   On the VENTUNO Q, D3 and D5 can pulse. The timer is the one `IO.pwm/2` uses
-  on D3, D5 and pin 80, which lose their PWM while a pulse train runs.
+  on D3, D5 and pin 80: their PWM pauses while a pulse train runs and resumes
+  when it stops. Don't change their PWM during a train.
   """
 
   alias ArduinoRouterEx.IO
@@ -49,7 +50,7 @@ defmodule ArduinoRouterEx.PulseTrain do
     end
   end
 
-  @doc "Stops the pulse train and returns its pins to inputs."
+  @doc "Stops the pulse train, returns its pins to inputs and resumes PWM on the timer's other pins."
   @spec stop() :: :ok | {:error, term()}
   def stop, do: ok(ArduinoRouterEx.call("pulse/stop", []))
 

@@ -25,9 +25,9 @@
 // and D5 (PB5, channel 2) with the same period and phase: pulse/set gives a
 // pin a pulse width_us long, offset_us into each period, at level 0 (low) or
 // 1 (high); pulse/start starts every pin set since the last pulse/stop, which
-// returns them to inputs. In combined PWM mode 2, a pulse starts on its
-// channel's compare value and ends on its pair's (channel 3 for D3, channel 1
-// for D5).
+// returns them to inputs and gives TIM3 back to PWM as it was before the
+// train. In combined PWM mode 2, a pulse starts on its channel's compare value
+// and ends on its pair's (channel 3 for D3, channel 1 for D5).
 
 #include <Arduino_RouterBridge.h>
 #include <Arduino_LED_Matrix.h>
@@ -213,6 +213,13 @@ struct Pulse {
 static Pulse pulses[] = {{3, 1, false, 0, 0, 0}, {5, 5, false, 0, 0, 0}};
 static bool pulsing = false;
 
+// TIM3 as Zephyr's PWM driver set it up, restored when the train stops so that
+// PWM on D3 and D5 works again.
+struct Tim3State {
+    uint32_t cr1, psc, arr, ccmr1, ccmr2, ccer, ccr1, ccr2, ccr3, ccr4;
+};
+static Tim3State pwm_state;
+
 // Encodes a 4-bit OCxM value for the low (channel 1 or 3) or high (2 or 4)
 // half of a CCMR register, with its preload enabled.
 static uint32_t ccmr_output(uint32_t ocm, bool high_half) {
@@ -255,6 +262,11 @@ bool pulse_start(int period_us) {
     if (!any) {
         return false;
     }
+    RCC->APB1LENR |= RCC_APB1LENR_TIM3EN;
+    if (!pulsing) {
+        pwm_state = {TIM3->CR1,   TIM3->PSC,  TIM3->ARR,  TIM3->CCMR1, TIM3->CCMR2,
+                     TIM3->CCER,  TIM3->CCR1, TIM3->CCR2, TIM3->CCR3,  TIM3->CCR4};
+    }
     pulse_halt();
 
     TIM3->PSC = CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC / TICK_HZ - 1;
@@ -293,11 +305,29 @@ bool pulse_start(int period_us) {
 }
 
 bool pulse_stop() {
-    pulse_halt();
-    for (Pulse &pulse : pulses) {
-        if (pulsing && pulse.set) {
-            GPIOB->MODER &= ~(0b11u << (2 * pulse.gpio));
+    if (pulsing) {
+        pulse_halt();
+        uint32_t ccer = pwm_state.ccer;
+        for (const Pulse &pulse : pulses) {
+            if (pulse.set) {
+                GPIOB->MODER &= ~(0b11u << (2 * pulse.gpio));
+                ccer &= pulse.pin == 3 ? ~(TIM_CCER_CC4E | TIM_CCER_CC4P) : ~(TIM_CCER_CC2E | TIM_CCER_CC2P);
+            }
         }
+        TIM3->PSC = pwm_state.psc;
+        TIM3->ARR = pwm_state.arr;
+        TIM3->CCR1 = pwm_state.ccr1;
+        TIM3->CCR2 = pwm_state.ccr2;
+        TIM3->CCR3 = pwm_state.ccr3;
+        TIM3->CCR4 = pwm_state.ccr4;
+        TIM3->CCMR1 = pwm_state.ccmr1;
+        TIM3->CCMR2 = pwm_state.ccmr2;
+        // Loads the preloaded prescaler and period.
+        TIM3->EGR = TIM_EGR_UG;
+        TIM3->CCER = ccer;
+        TIM3->CR1 = pwm_state.cr1;
+    }
+    for (Pulse &pulse : pulses) {
         pulse.set = false;
     }
     pulsing = false;
